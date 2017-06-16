@@ -1,19 +1,36 @@
-# forked from https://gist.github.com/rtqichen/b22a9c6bfc4f36e605a7b3ac1ab4122f
-# TODO: test like https://github.com/soskek/weight_normalization/tree/b60b81e19c2e9eaaff99810c4072d5b475f01ba4
-
-
-from typing import List
+from typing import List, Tuple
 
 import numpy
 import torch
+from torch.autograd import Function
 from torch.nn import Parameter, Module
 
 
+class WeightNormOne(Function):
+    def __init__(self, eps: float):
+        super().__init__()
+        self.eps = eps
+        self.norm = 0.0
+
+    def forward(self, g: torch.FloatTensor, v: torch.FloatTensor) -> torch.FloatTensor:
+        self.norm = torch.norm(v) + self.eps  # float cannot be saved for backward
+        self.save_for_backward(g, v)
+        return v * (g / (self.norm)).expand_as(v)
+
+    def backward(self, dw: torch.FloatTensor) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
+        g, v = self.saved_tensors
+        dg = dw.dot(v) / self.norm
+        dv = dw * (g / self.norm).expand_as(dw)
+        dv -= v * (g * dg / self.norm).expand_as(v)
+        return dw.new([dg]), dv
+
+
 class WeightNorm(Module):
-    def __init__(self, base: Module, name_list: List[str], eps: float=float(numpy.finfo(numpy.float32).eps)):
+    def __init__(self, base: Module, name_list: List[str], eps: float = float(numpy.finfo(numpy.float32).eps)):
         super().__init__()
         self.base = base
         self.eps = eps
+        self.trained = False
         self.name_list = name_list
         self.name_g_list = []
         self.name_v_list = []
@@ -26,33 +43,36 @@ class WeightNorm(Module):
             name_g = name + '_g'
             name_v = name + '_v'
 
-            # remove w from parameter list
-            delattr(self.base, name)
-
             # add g and v as new parameters
             self.register_parameter(name_g, g)
             self.register_parameter(name_v, v)
             self.name_g_list.append(name_g)
             self.name_v_list.append(name_v)
 
+            # init w
+            delattr(self.base, name)
+            self.update(name, name_g, name_v)
+
+    def cuda(self, device_id=None):
+        super().cuda()
+        for name in self.name_list:
+            setattr(self.base, name, getattr(self.base, name).cuda())
+
+    def cpu(self, device_id=None):
+        super().cpu()
+        for name in self.name_list:
+            setattr(self.base, name, getattr(self.base, name).cpu())
+
+    def update(self, name: str, name_g: str, name_v: str):
+        g = getattr(self, name_g)
+        v = getattr(self, name_v)
+        w = WeightNormOne(self.eps)(g, v)
+        setattr(self.base, name, w)
+
     def forward(self, *args, **kwargs):
-        for name, name_g, name_v in zip(self.name_list, self.name_g_list, self.name_v_list):
-            g = getattr(self, name_g)
-            v = getattr(self, name_v)
-            w = v * (g / (torch.norm(v) + self.eps)).expand_as(v)
-            setattr(self.base, name, w)
+        if self.training or self.trained:
+            for name, name_g, name_v in zip(self.name_list, self.name_g_list, self.name_v_list):
+                self.update(name, name_g, name_v)
+            self.trained = self.training
 
         return self.base(*args, **kwargs)
-
-
-if __name__ == '__main__':
-    # gradient check
-    linear = torch.nn.Linear(2, 3)
-    linear = WeightNorm(linear, ["weight", "bias"])
-    xs = torch.autograd.Variable(torch.randn(5, 2))
-    torch.autograd.gradcheck(linear, (xs,), eps=1e-6, atol=1e-4)
-
-    # pickle check
-    torch.save(linear, "/tmp/linear.pkl")
-    linear_load = torch.load("/tmp/linear.pkl")
-    numpy.testing.assert_allclose(linear(xs).data.numpy(), linear_load(xs).data.numpy())
