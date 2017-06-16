@@ -12,9 +12,9 @@ device_host = [lambda x: x.cpu(), lambda x: x.cuda() if torch.cuda.is_available(
 @pytest.mark.parametrize("on", device_host)
 def test_zero_initialized(on):
     linear = torch.nn.Linear(2, 3)
+    linear.weight.data.fill_(0)
     linear.bias.data.fill_(0)
-    linear = WeightNorm(linear, ["weight", "bias"])
-    on(linear)
+    linear = on(WeightNorm(linear, ["weight", "bias"]))
     xs = on(Variable(torch.randn(5, 2)))
     assert gradcheck(linear, (xs,))
 
@@ -48,27 +48,21 @@ def test_laziness(on):
 
 @pytest.mark.parametrize("on", device_host)
 def test_gradcheck_linear(on):
-    linear = torch.nn.Linear(2, 3)
-    linear = WeightNorm(linear, ["weight", "bias"])
-    on(linear)
+    linear = on(WeightNorm(torch.nn.Linear(2, 3), ["weight", "bias"]))
     xs = on(Variable(torch.randn(5, 2)))
     assert gradcheck(linear, (xs,))
 
 
 @pytest.mark.parametrize("on", device_host)
 def test_gradcheck_conv(on):
-    conv = torch.nn.Conv1d(2, 3, 3)
-    conv = WeightNorm(conv, ["weight", "bias"])
-    on(conv)
+    conv = on(WeightNorm(torch.nn.Conv1d(2, 3, 3), ["weight", "bias"]))
     xs = on(Variable(torch.randn(5, 2, 7)))
     assert gradcheck(conv, (xs,))
 
 
 @pytest.mark.parametrize("on", device_host)
 def test_serializable(on):
-    linear = torch.nn.Linear(2, 3)
-    linear = WeightNorm(linear, ["weight", "bias"])
-    on(linear)
+    linear = on(WeightNorm(torch.nn.Linear(2, 3), ["weight", "bias"]))
     torch.save(linear, "/tmp/linear.pkl")
     xs = on(Variable(torch.randn(5, 2)))
     linear_load = torch.load("/tmp/linear.pkl")
@@ -86,15 +80,12 @@ class AutogradWeightNorm(WeightNorm):
 @pytest.mark.parametrize("on", device_host)
 def test_autograd(on):
     linear = torch.nn.Linear(2, 3)
-    f = WeightNorm(linear, ["weight", "bias"])
-    g = AutogradWeightNorm(linear, ["weight", "bias"])
-    on(f)
-    on(g)
+    f = on(WeightNorm(linear, ["weight", "bias"]))
+    g = on(AutogradWeightNorm(linear, ["weight", "bias"]))
     f.train()
     g.train()
 
-    x = Variable(torch.randn(5, 2), requires_grad=True)
-    x = on(x)
+    x = on(Variable(torch.randn(5, 2), requires_grad=True))
     fx = f(x)
     gx = g(x)
     numpy.testing.assert_allclose(fx.cpu().data.numpy(), gx.cpu().data.numpy(), rtol=1e-6, atol=1e-4)

@@ -49,19 +49,19 @@ class WeightNorm(Module):
             self.name_g_list.append(name_g)
             self.name_v_list.append(name_v)
 
-            # init w
+            # init w (change Parameter to Variable)
             delattr(self.base, name)
             self.update(name, name_g, name_v)
 
     def cuda(self, device_id=None):
-        super().cuda()
         for name in self.name_list:
-            setattr(self.base, name, getattr(self.base, name).cuda())
+            setattr(self.base, name, getattr(self.base, name).cuda(device_id=device_id))
+        return super().cuda(device_id=device_id)
 
     def cpu(self, device_id=None):
-        super().cpu()
         for name in self.name_list:
-            setattr(self.base, name, getattr(self.base, name).cpu())
+            setattr(self.base, name, getattr(self.base, name).cpu())  # Variable has no device id
+        return super().cpu(device_id=device_id)
 
     def update(self, name: str, name_g: str, name_v: str):
         g = getattr(self, name_g)
