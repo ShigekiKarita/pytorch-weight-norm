@@ -6,7 +6,17 @@ from torch.autograd import Variable, gradcheck
 from weight_norm import WeightNorm
 
 
-device_host = [lambda x: x.cpu(), lambda x: x.cuda() if torch.cuda.is_available() else x]
+def to_cpu(x):
+    return x.cpu()
+
+
+def to_gpu(x):
+    if torch.cuda.is_available():
+        return x.cuda()
+    return x
+
+
+device_host = [to_cpu, to_gpu]
 
 
 @pytest.mark.parametrize("on", device_host)
@@ -16,7 +26,7 @@ def test_zero_initialized(on):
     linear.bias.data.fill_(0)
     linear = on(WeightNorm(linear, ["weight", "bias"]))
     xs = on(Variable(torch.randn(5, 2)))
-    assert gradcheck(linear, (xs,))
+    linear(xs)
 
 
 @pytest.mark.parametrize("on", device_host)
@@ -46,27 +56,26 @@ def test_laziness(on):
     assert wid4 == wid5, "after the first eval, weight should not be changed"
 
 
-@pytest.mark.parametrize("on", device_host)
-def test_gradcheck_linear(on):
-    linear = on(WeightNorm(torch.nn.Linear(2, 3), ["weight", "bias"]))
-    xs = on(Variable(torch.randn(5, 2)))
-    assert gradcheck(linear, (xs,))
-
-
-@pytest.mark.parametrize("on", device_host)
-def test_gradcheck_conv(on):
-    conv = on(WeightNorm(torch.nn.Conv1d(2, 3, 3), ["weight", "bias"]))
-    xs = on(Variable(torch.randn(5, 2, 7)))
-    assert gradcheck(conv, (xs,))
+m_x = [(torch.nn.Linear(2, 3), torch.randn(5, 2)),
+       (torch.nn.Conv1d(2, 3, 3), torch.randn(5, 2, 7)),
+       (torch.nn.LSTM(2, 3), torch.randn(4, 5, 2))]
 
 
 @pytest.mark.parametrize("on", device_host)
 def test_serializable(on):
-    linear = on(WeightNorm(torch.nn.Linear(2, 3), ["weight", "bias"]))
-    torch.save(linear, "/tmp/linear.pkl")
-    xs = on(Variable(torch.randn(5, 2)))
-    linear_load = torch.load("/tmp/linear.pkl")
-    numpy.testing.assert_allclose(linear(xs).cpu().data.numpy(), linear_load(xs).cpu().data.numpy())
+    for m, x in m_x:
+        w = on(WeightNorm(m))
+        torch.save(w, "/tmp/w.pkl")
+        xs = on(Variable(x))
+        w_load = torch.load("/tmp/w.pkl")
+        wxs = w(xs)
+        if isinstance(wxs, tuple):
+            wxs = wxs[0]
+        vxs = w_load(xs)
+        if isinstance(vxs, tuple):
+            vxs = vxs[0]
+        for wx, vx in zip(wxs, vxs):
+            numpy.testing.assert_allclose(wx.cpu().data.numpy(), vx.cpu().data.numpy())
 
 
 class AutogradWeightNorm(WeightNorm):
@@ -79,20 +88,29 @@ class AutogradWeightNorm(WeightNorm):
 
 @pytest.mark.parametrize("on", device_host)
 def test_autograd(on):
-    linear = torch.nn.Linear(2, 3)
-    f = on(WeightNorm(linear, ["weight", "bias"]))
-    g = on(AutogradWeightNorm(linear, ["weight", "bias"]))
-    f.train()
-    g.train()
+    for m, x in m_x:
+        on(m)
+        f = (WeightNorm(m))
+        g = (AutogradWeightNorm(m, f.name_list))
+        f.train()
+        g.train()
+        on(f)
+        on(g)
 
-    x = on(Variable(torch.randn(5, 2), requires_grad=True))
-    fx = f(x)
-    gx = g(x)
-    numpy.testing.assert_allclose(fx.cpu().data.numpy(), gx.cpu().data.numpy(), rtol=1e-6, atol=1e-4)
+        x = on(Variable(x, requires_grad=True))
+        fx = f(x)
+        if isinstance(fx, tuple):
+            fx = fx[0]
+        gx = g(x)
+        if isinstance(gx, tuple):
+            gx = gx[0]
+        numpy.testing.assert_allclose(fx.cpu().data.numpy(), gx.cpu().data.numpy(), rtol=1e-6, atol=1e-4)
 
-    fx.sum().backward()
-    gx.sum().backward()
-    for name in f.name_g_list + f.name_v_list:
-        df = getattr(f, name).grad.data.cpu().numpy()
-        dg = getattr(g, name).grad.data.cpu().numpy()
-        numpy.testing.assert_allclose(df, dg, rtol=1e-6, atol=1e-4)
+        print(f.weight_v)
+        fx.sum().backward(retain_variables=True)
+        gx.sum().backward(retain_variables=True)
+        for name in f.name_g_list + f.name_v_list:
+            df = getattr(f, name).grad.data.cpu().numpy()
+            dg = getattr(g, name).grad.data.cpu().numpy()
+            numpy.testing.assert_allclose(df, dg, rtol=1e-6, atol=1e-4)
+

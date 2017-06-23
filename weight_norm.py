@@ -26,8 +26,10 @@ class WeightNormOne(Function):
 
 
 class WeightNorm(Module):
-    def __init__(self, base: Module, name_list: List[str], eps: float = float(numpy.finfo(numpy.float32).eps)):
+    def __init__(self, base: Module, name_list: List[str]=None, eps: float = float(numpy.finfo(numpy.float32).eps)):
         super().__init__()
+        if name_list is None:
+            name_list = list(dict(base.named_parameters()).keys())
         self.base = base
         self.eps = eps
         self.trained = False
